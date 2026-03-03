@@ -114,14 +114,6 @@ Status bar items also trigger provider-specific refresh on click.
 - Auto-refresh interval is fixed at 60 seconds
 - If VS Code rejects writes for `geminiUsage.*`, extension fallback state is used to keep Gemini toggles applied immediately
 
-## Local Development
-
-```bash
-npm install
-```
-
-Open this folder in VS Code and press `F5` to launch the Extension Development Host.
-
 ## Security Notes
 
 - Do not hardcode OAuth client IDs/secrets in source code.
@@ -131,3 +123,4 @@ Open this folder in VS Code and press `F5` to launch the Extension Development H
 ## License
 
 [MIT](./LICENSE)
+
