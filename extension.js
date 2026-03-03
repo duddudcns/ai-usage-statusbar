@@ -38,10 +38,10 @@ function activate(context) {
   const claudeItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
   const copilotItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 98);
   const geminiItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 97);
-  codexItem.color = new vscode.ThemeColor('terminal.ansiBrightBlue');
-  claudeItem.color = new vscode.ThemeColor('terminal.ansiBrightRed');
-  copilotItem.color = new vscode.ThemeColor('terminal.ansiBrightGreen');
-  geminiItem.color = new vscode.ThemeColor('terminal.ansiYellow');
+  codexItem.color = '#4fc1ff';
+  claudeItem.color = '#f48771';
+  copilotItem.color = '#4ec9b0';
+  geminiItem.color = '#d7ba7d';
 
   let timer = null;
   let panel = null;
