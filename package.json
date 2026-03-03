@@ -2,8 +2,8 @@
   "name": "codex-usage-statusbar",
   "displayName": "AI Usage Status Bar",
   "description": "Show Codex, Claude, Copilot, and Gemini usage in the status bar with a sidebar control panel.",
-  "version": "0.0.36",
-  "publisher": "local",
+  "version": "0.0.37",
+  "publisher": "duddudcns",
   "icon": "ai_usage_statusbar.png",
   "engines": {
     "vscode": "^1.85.0"
@@ -30,7 +30,7 @@
         {
           "type": "webview",
           "id": "aiUsage.settingsPanel",
-          "name": "Settings v0.0.36"
+          "name": "Settings v0.0.37"
         }
       ]
     },
@@ -54,11 +54,41 @@
         "aiUsage.language": {
           "type": "string",
           "default": "en",
-          "enum": ["ko","en","ja","zh-cn","zh-tw","fr","de","es","pt","ru","it","tr","pl","nl","vi","id"],
+          "enum": [
+            "ko",
+            "en",
+            "ja",
+            "zh-cn",
+            "zh-tw",
+            "fr",
+            "de",
+            "es",
+            "pt",
+            "ru",
+            "it",
+            "tr",
+            "pl",
+            "nl",
+            "vi",
+            "id"
+          ],
           "enumDescriptions": [
-            "한국어","English","日本語","中文(简体)","中文(繁體)",
-            "Français","Deutsch","Español","Português","Русский",
-            "Italiano","Türkçe","Polski","Nederlands","Tiếng Việt","Bahasa Indonesia"
+            "한국어",
+            "English",
+            "日本語",
+            "中文(简体)",
+            "中文(繁體)",
+            "Français",
+            "Deutsch",
+            "Español",
+            "Português",
+            "Русский",
+            "Italiano",
+            "Türkçe",
+            "Polski",
+            "Nederlands",
+            "Tiếng Việt",
+            "Bahasa Indonesia"
           ],
           "description": "Language for the sidebar panel only. On first install, VS Code UI language is used; unsupported locales fallback to English."
         },
@@ -156,5 +186,9 @@
   "scripts": {
     "lint": "echo no-lint",
     "test": "echo no-test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/duddudcns/ai-usage-statusbar.git"
   }
 }
