@@ -30,6 +30,44 @@ When you use more than one AI assistant, usage and reset information is scattere
 - Language support for the sidebar panel:
   - `ko`, `en`, `ja`, `zh-cn`, `zh-tw`, `fr`, `de`, `es`, `pt`, `ru`, `it`, `tr`, `pl`, `nl`, `vi`, `id`
 
+## Screenshots
+
+### Panel - Show Providers
+
+Controls which providers are visible in the status bar and sidebar cards.
+
+![Show Providers](images/show-providers.png)
+
+### Panel - Usages
+
+Displays per-provider usage cards with remaining percent and reset timing.
+
+![Usages](images/usage.png)
+
+### Panel - Show Providers (Gemini)
+
+Lets you choose which Gemini model groups are shown (`Pro`, `Flash`, `Flash Lite`).
+
+![Show Providers Gemini](images/show-providers-gemini.png)
+
+### Panel - Languages
+
+Sidebar language selector, with English shown first in the dropdown.
+
+![Languages](images/language.png)
+
+### Status Bar - Overview
+
+Compact usage summary for all enabled providers directly in the VS Code status bar.
+
+![Status Bar](images/statusbar.png)
+
+### Status Bar - Tooltip
+
+Expanded provider details shown when hovering over a status bar item.
+
+![Tooltip](images/tooltip.png)
+
 ## Provider Data Flow
 
 ### Codex
