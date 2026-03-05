@@ -16,6 +16,8 @@ const COPILOT_STARTUP_RETRY_DELAY_MS = 3500;
 const PROVIDER_MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1200;
 const CLAUDE_OAUTH_TIMEOUT_MS = 12000;
+const CLAUDE_SESSION_WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours
+const CLAUDE_PLAN_TOKEN_LIMITS = { pro: 44000, max_5: 88000, max5: 88000, max_20: 220000, max20: 220000, team: 44000 };
 const GEMINI_TIMEOUT_MS = 12000;
 const GEMINI_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GEMINI_CODE_ASSIST_ENDPOINT = '/v1internal:loadCodeAssist';
@@ -1340,8 +1342,16 @@ async function fetchClaudeUsage(output) {
     const projectsRoot = expandHome(cfg.claudeSessionsRoot);
     const sessionHit = findNewestClaudeSessionWithRateLimits(projectsRoot, 20);
     if (!sessionHit) {
-      // If actively rate-limited and no cache exists, show rate-limited state rather than misleading "assumed full"
+      // 429 active: try local JSONL token counting before giving up
       if (isClaudeRateLimitError(oauthResult?.error)) {
+        const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
+        const tokenResult = buildClaudeRateLimitsFromLocalTokenCount(projectsRoot, credPath, output);
+        if (tokenResult) {
+          output.appendLine(`[info:claude] 429 fallback: using local JSONL token count (${tokenResult.usedTokens}/${tokenResult.planLimit} tokens)`);
+          lastClaudeRateLimitResult = tokenResult.result;
+          extensionState?.update('claude.lastRateLimitResult', tokenResult.result);
+          return tokenResult.result;
+        }
         const remainSec = lastClaudeOauth429At
           ? Math.max(0, Math.ceil((lastClaudeOauth429RetryAfterMs - (Date.now() - lastClaudeOauth429At)) / 1000))
           : 0;
@@ -2135,6 +2145,99 @@ function readLatestTokenCountByLimit(filePath) {
   }
 
   return byLimit;
+}
+
+/**
+ * 로컬 JSONL 파일에서 현재 5시간 세션의 토큰 사용량을 읽어 rateLimits 객체를 생성.
+ * API 429 오류 시 fallback으로 사용.
+ */
+function buildClaudeRateLimitsFromLocalTokenCount(projectsRoot, credPath, output) {
+  try {
+    // 플랜 한도 결정 (credentials.json의 subscriptionType 참고)
+    let planLimit = 44000; // 기본 pro
+    try {
+      if (fs.existsSync(credPath)) {
+        const cred = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+        const subType = (cred?.claudeAiOauth?.subscriptionType || '').toLowerCase();
+        planLimit = CLAUDE_PLAN_TOKEN_LIMITS[subType] || 44000;
+      }
+    } catch (_e) { /* ignore */ }
+
+    if (!fs.existsSync(projectsRoot)) {
+      return null;
+    }
+
+    // 모든 JSONL 파일 수집
+    const files = [];
+    const stack = [projectsRoot];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      let entries;
+      try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch (_e) { continue; }
+      for (const entry of entries) {
+        const full = path.join(current, entry.name);
+        if (entry.isDirectory()) { stack.push(full); continue; }
+        if (entry.isFile() && full.endsWith('.jsonl')) { files.push(full); }
+      }
+    }
+
+    // 각 파일에서 최근 5시간 내 assistant 메시지의 토큰 수집 (UUID 기반 dedup)
+    const now = Date.now();
+    const windowStart = now - CLAUDE_SESSION_WINDOW_MS;
+    const seenUuids = new Set();
+    const messages = [];
+
+    for (const filePath of files) {
+      let content;
+      try { content = fs.readFileSync(filePath, 'utf8'); } catch (_e) { continue; }
+      const lines = content.split(/\r?\n/);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const obj = JSON.parse(line);
+          if (obj?.type !== 'assistant') continue;
+          const msgId = obj?.uuid || obj?.message?.id || null;
+          if (msgId && seenUuids.has(msgId)) continue;
+          if (msgId) seenUuids.add(msgId);
+          const ts = obj?.timestamp ? new Date(obj.timestamp).getTime() : 0;
+          if (!ts || ts < windowStart) continue;
+          const usage = obj?.message?.usage;
+          if (!usage) continue;
+          const tokens = (usage.input_tokens || 0) + (usage.output_tokens || 0);
+          if (tokens > 0) messages.push({ ts, tokens });
+        } catch (_e) { /* ignore */ }
+      }
+    }
+
+    if (messages.length === 0) return null;
+
+    // 가장 오래된 메시지 기준으로 5시간 윈도우 세션 시작 계산
+    messages.sort((a, b) => a.ts - b.ts);
+    const sessionStart = messages[0].ts;
+    const sessionEnd = sessionStart + CLAUDE_SESSION_WINDOW_MS;
+    const usedTokens = messages.reduce((s, m) => s + m.tokens, 0);
+    const usedPercent = Math.min((usedTokens / planLimit) * 100, 100);
+    const resetsAtSec = Math.floor(sessionEnd / 1000);
+
+    const rateLimits = {
+      primary: { used_percent: usedPercent, resets_at: resetsAtSec },
+      secondary: null,
+    };
+    const summary = formatRateLimitSingleWindowSummary(rateLimits);
+    const raw = `Claude session tokens: ${usedTokens.toLocaleString()} / ${planLimit.toLocaleString()}`;
+    const result = {
+      ok: true,
+      summary,
+      raw,
+      sourceLabel: `Source: local JSONL token count (${usedTokens.toLocaleString()}/${planLimit.toLocaleString()} tokens)`,
+      rateLimits,
+      groups: [{ label: 'Claude', rateLimits }],
+    };
+    return { result, usedTokens, planLimit };
+  } catch (err) {
+    if (output) output.appendLine(`[warn:claude] local token count failed: ${err.message}`);
+    return null;
+  }
 }
 
 function readLatestClaudeRateLimitsFromSession(filePath) {
