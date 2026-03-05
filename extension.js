@@ -33,6 +33,8 @@ let copilotAuthPromptAttempted = false;
 let lastClaudeRateLimitResult = null;
 let lastClaudeOauth429At = 0;
 let lastClaudeOauth429RetryAfterMs = 5 * 60 * 1000; // starts at 5 min, exponential backoff
+let lastClaudeOauthSuccessAt = 0; // timestamp of last successful API call
+const CLAUDE_OAUTH_MIN_INTERVAL_MS = 5 * 60 * 1000; // call API at most once per 5 minutes
 let extensionState = null;
 
 function activate(context) {
@@ -1279,6 +1281,16 @@ async function fetchClaudeUsage(output) {
     let oauthResult = null;
     // Skip API call during 429 cooldown period (exponential backoff: 5m→15m→30m)
     const MAX_COOLDOWN_MS = 30 * 60 * 1000;
+
+    // Rate-limit ourselves: don't call the API more than once per 5 minutes
+    if (lastClaudeOauthSuccessAt && Date.now() - lastClaudeOauthSuccessAt < CLAUDE_OAUTH_MIN_INTERVAL_MS) {
+      if (lastClaudeRateLimitResult?.ok) {
+        const ageSec = Math.round((Date.now() - lastClaudeOauthSuccessAt) / 1000);
+        output.appendLine(`[info:claude] using cached result (${ageSec}s old, next API call in ${Math.ceil((CLAUDE_OAUTH_MIN_INTERVAL_MS - (Date.now() - lastClaudeOauthSuccessAt)) / 1000)}s)`);
+        return { ...lastClaudeRateLimitResult, sourceLabel: `${lastClaudeRateLimitResult.sourceLabel} (cached)` };
+      }
+    }
+
     if (lastClaudeOauth429At && Date.now() - lastClaudeOauth429At < lastClaudeOauth429RetryAfterMs) {
       const remainSec = Math.ceil((lastClaudeOauth429RetryAfterMs - (Date.now() - lastClaudeOauth429At)) / 1000);
       output.appendLine(`[info:claude] oauth 429 cooldown active, skipping API call (${remainSec}s remaining, cooldown=${Math.round(lastClaudeOauth429RetryAfterMs/60000)}min)`);
@@ -1290,6 +1302,7 @@ async function fetchClaudeUsage(output) {
           lastClaudeRateLimitResult = oauthResult;
           lastClaudeOauth429At = 0;
           lastClaudeOauth429RetryAfterMs = 5 * 60 * 1000; // reset backoff on success
+          lastClaudeOauthSuccessAt = Date.now();
           extensionState?.update('claude.lastRateLimitResult', oauthResult);
           return oauthResult;
         }
