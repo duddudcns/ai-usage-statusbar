@@ -1328,6 +1328,14 @@ async function fetchClaudeUsage(output) {
     const projectsRoot = expandHome(cfg.claudeSessionsRoot);
     const sessionHit = findNewestClaudeSessionWithRateLimits(projectsRoot, 20);
     if (!sessionHit) {
+      // If actively rate-limited and no cache exists, show rate-limited state rather than misleading "assumed full"
+      if (isClaudeRateLimitError(oauthResult?.error)) {
+        const remainSec = lastClaudeOauth429At
+          ? Math.max(0, Math.ceil((5 * 60 * 1000 - (Date.now() - lastClaudeOauth429At)) / 1000))
+          : 0;
+        output.appendLine(`[info:claude] rate limited, no cached data available (cooldown ${remainSec}s remaining)`);
+        return { ok: false, error: `Rate limited by Claude API (retry in ${remainSec}s)` };
+      }
       if (shouldAssumeClaudeFullFromNoData(oauthResult?.error, projectsRoot)) {
         output.appendLine('[info:claude] no session rate-limit data, assuming full quota');
         return buildClaudeAssumedFullResult('local session rate limits unavailable');
