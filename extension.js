@@ -30,6 +30,7 @@ const SUPPORTED_LANGUAGES = new Set([
 let copilotAuthPromptAttempted = false;
 let lastClaudeRateLimitResult = null;
 let lastClaudeOauth429At = 0;
+let lastClaudeOauth429RetryAfterMs = 5 * 60 * 1000; // starts at 5 min, exponential backoff
 let extensionState = null;
 
 function activate(context) {
@@ -1274,11 +1275,11 @@ async function fetchClaudeUsage(output) {
       }
     }
     let oauthResult = null;
-    // Skip API call during 429 cooldown period (5 minutes)
-    const OAUTH_429_COOLDOWN_MS = 5 * 60 * 1000;
-    if (lastClaudeOauth429At && Date.now() - lastClaudeOauth429At < OAUTH_429_COOLDOWN_MS) {
-      const remainSec = Math.ceil((OAUTH_429_COOLDOWN_MS - (Date.now() - lastClaudeOauth429At)) / 1000);
-      output.appendLine(`[info:claude] oauth 429 cooldown active, skipping API call (${remainSec}s remaining)`);
+    // Skip API call during 429 cooldown period (exponential backoff: 5m→15m→30m)
+    const MAX_COOLDOWN_MS = 30 * 60 * 1000;
+    if (lastClaudeOauth429At && Date.now() - lastClaudeOauth429At < lastClaudeOauth429RetryAfterMs) {
+      const remainSec = Math.ceil((lastClaudeOauth429RetryAfterMs - (Date.now() - lastClaudeOauth429At)) / 1000);
+      output.appendLine(`[info:claude] oauth 429 cooldown active, skipping API call (${remainSec}s remaining, cooldown=${Math.round(lastClaudeOauth429RetryAfterMs/60000)}min)`);
       oauthResult = { ok: false, error: 'HTTP 429: rate limit cooldown active' };
     } else {
       for (let attempt = 1; attempt <= PROVIDER_MAX_RETRY_ATTEMPTS; attempt += 1) {
@@ -1286,14 +1287,25 @@ async function fetchClaudeUsage(output) {
         if (oauthResult.ok) {
           lastClaudeRateLimitResult = oauthResult;
           lastClaudeOauth429At = 0;
+          lastClaudeOauth429RetryAfterMs = 5 * 60 * 1000; // reset backoff on success
           extensionState?.update('claude.lastRateLimitResult', oauthResult);
           return oauthResult;
         }
         output.appendLine(`[info:claude] oauth failed (attempt ${attempt}/${PROVIDER_MAX_RETRY_ATTEMPTS}): ${oauthResult.error}`);
         // 429: don't retry (cooldown applied below), break immediately
         if (isClaudeRateLimitError(oauthResult.error)) {
+          // Parse Retry-After from error message if embedded, else use exponential backoff
+          const retryAfterMatch = oauthResult.error.match(/retry.after[:\s]+([\d]+)/i);
+          const retryAfterSec = retryAfterMatch ? parseInt(retryAfterMatch[1], 10) : null;
+          if (retryAfterSec && retryAfterSec > 0) {
+            lastClaudeOauth429RetryAfterMs = retryAfterSec * 1000;
+          } else {
+            // exponential backoff: double each time, max 30 min
+            lastClaudeOauth429RetryAfterMs = Math.min(lastClaudeOauth429RetryAfterMs * 2, MAX_COOLDOWN_MS);
+          }
           lastClaudeOauth429At = Date.now();
-          output.appendLine('[info:claude] oauth 429 received, entering 5-min cooldown');
+          const cooldownMin = Math.round(lastClaudeOauth429RetryAfterMs / 60000);
+          output.appendLine(`[info:claude] oauth 429 received, entering ${cooldownMin}-min cooldown`);
           break;
         }
         if (!isClaudeTransientError(oauthResult.error) || attempt >= PROVIDER_MAX_RETRY_ATTEMPTS) {
@@ -1331,9 +1343,10 @@ async function fetchClaudeUsage(output) {
       // If actively rate-limited and no cache exists, show rate-limited state rather than misleading "assumed full"
       if (isClaudeRateLimitError(oauthResult?.error)) {
         const remainSec = lastClaudeOauth429At
-          ? Math.max(0, Math.ceil((5 * 60 * 1000 - (Date.now() - lastClaudeOauth429At)) / 1000))
+          ? Math.max(0, Math.ceil((lastClaudeOauth429RetryAfterMs - (Date.now() - lastClaudeOauth429At)) / 1000))
           : 0;
-        output.appendLine(`[info:claude] rate limited, no cached data available (cooldown ${remainSec}s remaining)`);
+        const cooldownMin = Math.round(lastClaudeOauth429RetryAfterMs / 60000);
+        output.appendLine(`[info:claude] rate limited, no cached data available (cooldown ${remainSec}s remaining, next retry in ${cooldownMin}min)`);
         return { ok: false, error: `Rate limited by Claude API (retry in ${remainSec}s)` };
       }
       if (shouldAssumeClaudeFullFromNoData(oauthResult?.error, projectsRoot)) {
@@ -2739,7 +2752,14 @@ function httpsRequestJson(hostname, urlPath, method, headers, body, timeoutMs) {
         });
         res.on('end', () => {
           if (res.statusCode !== 200) {
-            // 에러 바디를 포함해 디버깅에 활용
+            // 429의 경우 Retry-After 헤더가 있으면 에러 메시지에 포함
+            if (res.statusCode === 429) {
+              const retryAfter = res.headers['retry-after'];
+              const msg = retryAfter
+                ? `HTTP 429: retry-after: ${retryAfter}: ${raw.slice(0, 200)}`
+                : `HTTP 429: ${raw.slice(0, 200)}`;
+              return reject(new Error(msg));
+            }
             return reject(new Error(`HTTP ${res.statusCode}: ${raw.slice(0, 200)}`));
           }
           try {
