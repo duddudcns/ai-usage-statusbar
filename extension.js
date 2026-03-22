@@ -9,6 +9,7 @@ const CODEX_ICON = '$(pulse)';
 const CLAUDE_ICON = '$(sparkle)';
 const COPILOT_ICON = '$(github)';
 const GEMINI_ICON = '$(hubot)';
+const KIMI_ICON = '$(moon)';
 const STATUS_BAR_LANGUAGE = 'en';
 const WEEKLY_LOW_PERCENT_THRESHOLD = 5;
 const AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
@@ -16,9 +17,12 @@ const COPILOT_STARTUP_RETRY_DELAY_MS = 3500;
 const PROVIDER_MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1200;
 const CLAUDE_OAUTH_TIMEOUT_MS = 12000;
+const OPENAI_WEB_TIMEOUT_MS = 12000;
 const CLAUDE_SESSION_WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours
 const CLAUDE_PLAN_TOKEN_LIMITS = { pro: 44000, max_5: 88000, max5: 88000, max_20: 220000, max20: 220000, team: 44000 };
 const GEMINI_TIMEOUT_MS = 12000;
+const KIMI_TIMEOUT_MS = 8000;
+const KIMI_API_BASE = 'https://api.kimi.com/coding/v1';
 const GEMINI_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GEMINI_CODE_ASSIST_ENDPOINT = '/v1internal:loadCodeAssist';
 const GEMINI_QUOTA_ENDPOINT = '/v1internal:retrieveUserQuota';
@@ -44,18 +48,20 @@ function activate(context) {
   const claudeItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
   const copilotItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 98);
   const geminiItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 97);
+  const kimiItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 96);
   codexItem.color = '#4fc1ff';
   claudeItem.color = '#f48771';
   copilotItem.color = '#4ec9b0';
   geminiItem.color = '#d7ba7d';
+  kimiItem.color = '#c586c0';
 
   let timer = null;
   let panel = null;
-  let lastResults = { codex: null, claude: null, copilot: null, gemini: null };
+  let lastResults = { codex: null, claude: null, copilot: null, gemini: null, kimi: null };
   let copilotStartupRetryScheduled = false;
   let allRefreshInFlight = null;
-  const providerRefreshInFlight = { codex: null, claude: null, copilot: null, gemini: null };
-  const refreshState = { all: false, providers: { codex: false, claude: false, copilot: false, gemini: false } };
+  const providerRefreshInFlight = { codex: null, claude: null, copilot: null, gemini: null, kimi: null };
+  const refreshState = { all: false, providers: { codex: false, claude: false, copilot: false, gemini: false, kimi: false } };
   let refreshSequence = 0;
   void ensureInitialLanguageSetting();
 
@@ -63,16 +69,19 @@ function activate(context) {
   claudeItem.command = 'codexUsage.refreshClaude';
   copilotItem.command = 'codexUsage.refreshCopilot';
   geminiItem.command = 'codexUsage.refreshGemini';
+  kimiItem.command = 'codexUsage.refreshKimi';
   // 초기 로딩: 아이콘 + 스피너 (이후 새로고침 시에는 이전 데이터를 유지)
   codexItem.text = `${CODEX_ICON} $(sync~spin)`;
   claudeItem.text = `${CLAUDE_ICON} $(sync~spin)`;
   copilotItem.text = `${COPILOT_ICON} $(sync~spin)`;
   geminiItem.text = `${GEMINI_ICON} $(sync~spin)`;
+  kimiItem.text = `${KIMI_ICON} $(sync~spin)`;
   const cfg0 = getConfig();
   if (cfg0.codexEnabled) codexItem.show();
   if (cfg0.claudeEnabled) claudeItem.show();
   if (cfg0.copilotEnabled) copilotItem.show();
   if (cfg0.geminiEnabled) geminiItem.show();
+  if (cfg0.kimiEnabled) kimiItem.show();
 
   const emitRefreshState = () => {
     panel?.postRefreshState({
@@ -145,6 +154,16 @@ function activate(context) {
         geminiItem.hide();
       }
       lastResults.gemini = result;
+    } else if (provider === 'kimi') {
+      if (result) {
+        if (!result.ok) output.appendLine(`[error:kimi] ${result.error}`);
+        kimiItem.text = `${KIMI_ICON} ${result.ok ? buildStatusBarTextEn(result) : '-'}`;
+        kimiItem.tooltip = buildProviderTooltip('Kimi', KIMI_ICON, result);
+        kimiItem.show();
+      } else {
+        kimiItem.hide();
+      }
+      lastResults.kimi = result;
     }
     panel?.postResults(lastResults);
   };
@@ -167,7 +186,9 @@ function activate(context) {
         ? cfg.claudeEnabled
         : provider === 'copilot'
           ? cfg.copilotEnabled
-          : cfg.geminiEnabled;
+          : provider === 'gemini'
+            ? cfg.geminiEnabled
+            : cfg.kimiEnabled;
     if (!enabled) {
       output.appendLine(`[refresh:${refreshId}] ${provider} skipped (disabled)`);
       applyProviderResult(provider, null);
@@ -185,7 +206,8 @@ function activate(context) {
         if (provider === 'codex') result = await fetchUsage(output);
         else if (provider === 'claude') result = await fetchClaudeUsage(output);
         else if (provider === 'copilot') result = await fetchCopilotUsage(output);
-        else result = await fetchGeminiUsage(output);
+        else if (provider === 'gemini') result = await fetchGeminiUsage(output);
+        else result = await fetchKimiUsage(output);
       } catch (err) {
         result = { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
@@ -243,6 +265,7 @@ function activate(context) {
         runProviderRefresh('claude', { refreshId, allowWhenAll: true }),
         runProviderRefresh('copilot', { refreshId, allowWhenAll: true }),
         runProviderRefresh('gemini', { refreshId, allowWhenAll: true }),
+        runProviderRefresh('kimi', { refreshId, allowWhenAll: true }),
       ]);
 
       output.appendLine(`[refresh:${refreshId}] done (${Date.now() - startedAt}ms)`);
@@ -350,6 +373,16 @@ function activate(context) {
         geminiItem.hide();
       }
 
+      if (cfg.kimiEnabled) {
+        if (lastResults.kimi) {
+          kimiItem.text = `${KIMI_ICON} ${lastResults.kimi.ok ? buildStatusBarTextEn(lastResults.kimi) : '-'}`;
+          kimiItem.tooltip = buildProviderTooltip('Kimi', KIMI_ICON, lastResults.kimi);
+        }
+        kimiItem.show();
+      } else {
+        kimiItem.hide();
+      }
+
       panel?.postResults(lastResults);
       emitRefreshState();
       return;
@@ -359,7 +392,8 @@ function activate(context) {
       !e.affectsConfiguration('codexUsage') &&
       !e.affectsConfiguration('claudeUsage') &&
       !e.affectsConfiguration('copilotUsage') &&
-      !e.affectsConfiguration('geminiUsage')
+      !e.affectsConfiguration('geminiUsage') &&
+      !e.affectsConfiguration('kimiUsage')
     ) {
       return;
     }
@@ -383,6 +417,9 @@ function activate(context) {
   const refreshGeminiCmd = vscode.commands.registerCommand('codexUsage.refreshGemini', async () => {
     await runProviderRefresh('gemini');
   });
+  const refreshKimiCmd = vscode.commands.registerCommand('codexUsage.refreshKimi', async () => {
+    await runProviderRefresh('kimi');
+  });
   const refreshGeminiFromCacheCmd = vscode.commands.registerCommand('codexUsage.refreshGeminiFromCache', async () => {
     const cfg = getConfig();
     output.appendLine(
@@ -402,12 +439,14 @@ function activate(context) {
     claudeItem,
     copilotItem,
     geminiItem,
+    kimiItem,
     output,
     refreshCmd,
     refreshCodexCmd,
     refreshClaudeCmd,
     refreshCopilotCmd,
     refreshGeminiCmd,
+    refreshKimiCmd,
     refreshGeminiFromCacheCmd,
     openOutputCmd,
     onConfigChanged,
@@ -728,7 +767,7 @@ class SettingsPanelProvider {
         const r = this._getLastResults?.();
         if (r) this.postResults(r);
         // 첫 로드 시 캐시가 비어 있으면 즉시 1회 새로고침하여 로딩 고착 방지
-        if (!r || (!r.codex && !r.claude && !r.copilot && !r.gemini)) {
+        if (!r || (!r.codex && !r.claude && !r.copilot && !r.gemini && !r.kimi)) {
           vscode.commands.executeCommand('codexUsage.refresh');
         }
       } else if (msg.type === 'refresh') {
@@ -739,6 +778,7 @@ class SettingsPanelProvider {
         else if (provider === 'claude') vscode.commands.executeCommand('codexUsage.refreshClaude');
         else if (provider === 'copilot') vscode.commands.executeCommand('codexUsage.refreshCopilot');
         else if (provider === 'gemini') vscode.commands.executeCommand('codexUsage.refreshGemini');
+        else if (provider === 'kimi') vscode.commands.executeCommand('codexUsage.refreshKimi');
       }
     }, undefined, this._context.subscriptions);
 
@@ -847,6 +887,7 @@ class SettingsPanelProvider {
   .dot-red   { background: #f48771; }
   .dot-green { background: #4ec9b0; }
   .dot-yellow { background: #d7ba7d; }
+  .dot-purple { background: #c586c0; }
   /* 숫자/셀렉트 행 */
   .row {
     display: flex; align-items: center; justify-content: space-between;
@@ -937,6 +978,13 @@ class SettingsPanelProvider {
       <span class="dot dot-yellow"></span>Gemini
     </label>
   </div>
+  <div class="item" onclick="toggleCheck('kimi')">
+    <input type="checkbox" id="kimi" ${chk(cfg.kimiEnabled)}
+      onclick="event.stopPropagation(); toggle('kimiUsage.enabled', this.checked)">
+    <label for="kimi" onclick="event.preventDefault()">
+      <span class="dot" style="background:#c586c0"></span>Kimi
+    </label>
+  </div>
 </div>
 
 <!-- 사용량 -->
@@ -999,9 +1047,9 @@ class SettingsPanelProvider {
 <script>
 const vscode = acquireVsCodeApi();
 const T = ${JSON.stringify(t)};
-const INITIAL_RESULTS = ${JSON.stringify(this._getLastResults?.() || { codex: null, claude: null, copilot: null, gemini: null })};
+const INITIAL_RESULTS = ${JSON.stringify(this._getLastResults?.() || { codex: null, claude: null, copilot: null, gemini: null, kimi: null })};
 let CURRENT_RESULTS = INITIAL_RESULTS;
-let REFRESH_STATE = { all: false, providers: { codex: false, claude: false, copilot: false, gemini: false } };
+let REFRESH_STATE = { all: false, providers: { codex: false, claude: false, copilot: false, gemini: false, kimi: false } };
 
 function toggle(key, value) { vscode.postMessage({ type: 'update', key, value }); }
 function update(key, value) { vscode.postMessage({ type: 'update', key, value }); }
@@ -1025,13 +1073,14 @@ function setButtonRefreshing(btnId, labelId, refreshing, baseText) {
   else btn.classList.remove('refreshing');
 }
 function setRefreshingState(state) {
-  REFRESH_STATE = state || { all: false, providers: { codex: false, claude: false, copilot: false, gemini: false } };
+  REFRESH_STATE = state || { all: false, providers: { codex: false, claude: false, copilot: false, gemini: false, kimi: false } };
   const p = REFRESH_STATE.providers || {};
   setButtonRefreshing('refresh-btn', 'refresh-label', !!REFRESH_STATE.all, T.refreshNow);
   setButtonRefreshing('refresh-btn-codex', 'refresh-label-codex', !!REFRESH_STATE.all || !!p.codex, T.refreshNow);
   setButtonRefreshing('refresh-btn-claude', 'refresh-label-claude', !!REFRESH_STATE.all || !!p.claude, T.refreshNow);
   setButtonRefreshing('refresh-btn-copilot', 'refresh-label-copilot', !!REFRESH_STATE.all || !!p.copilot, T.refreshNow);
   setButtonRefreshing('refresh-btn-gemini', 'refresh-label-gemini', !!REFRESH_STATE.all || !!p.gemini, T.refreshNow);
+  setButtonRefreshing('refresh-btn-kimi', 'refresh-label-kimi', !!REFRESH_STATE.all || !!p.kimi, T.refreshNow);
 }
 function toggleCheck(id) {
   const el = document.getElementById(id);
@@ -1040,6 +1089,7 @@ function toggleCheck(id) {
     codex: 'codexUsage.enabled', claude: 'claudeUsage.enabled',
     copilot: 'copilotUsage.enabled',
     gemini: 'geminiUsage.enabled',
+    kimi: 'kimiUsage.enabled',
     geminiFlashLite: 'geminiUsage.showFlashLite',
     geminiFlash: 'geminiUsage.showFlash',
     geminiPro: 'geminiUsage.showPro',
@@ -1169,6 +1219,7 @@ function renderUsage(data) {
   if (isProviderEnabled('claude')) html += cardHtml('dot-red','Claude',d.claude);
   if (isProviderEnabled('copilot')) html += cardHtml('dot-green','Copilot',d.copilot);
   if (isProviderEnabled('gemini')) html += cardHtml('dot-yellow','Gemini',d.gemini);
+  if (isProviderEnabled('kimi')) html += cardHtml('dot-purple','Kimi',d.kimi);
   area.innerHTML = html || '<div class="usage-text">' + T.noData + '</div>';
 }
 
@@ -1229,6 +1280,9 @@ function getConfig() {
     geminiShowFlashLite: getGeminiToggleValue(config, 'geminiUsage.showFlashLite', true),
     geminiShowFlash: getGeminiToggleValue(config, 'geminiUsage.showFlash', true),
     geminiShowPro: getGeminiToggleValue(config, 'geminiUsage.showPro', true),
+    kimiEnabled: config.get('kimiUsage.enabled', true),
+    kimiCredentialsPath: config.get('kimiUsage.credentialsPath', '~/.kimi/credentials/kimi-code.json'),
+    kimiCommandTimeoutMs: config.get('kimiUsage.commandTimeoutMs', 8000),
     source: config.get('codexUsage.source', 'auto'),
     command: config.get('codexUsage.command', 'codex usage'),
     commandTimeoutMs: config.get('codexUsage.commandTimeoutMs', 10000),
@@ -1242,6 +1296,10 @@ function getConfig() {
 
 async function fetchUsage(output) {
   const cfg = getConfig();
+  if (cfg.source === 'openaiWeb') {
+    return fetchUsageFromOpenAIWeb(output);
+  }
+
   if (cfg.source === 'command') {
     return fetchUsageFromCommand(cfg, output);
   }
@@ -1250,6 +1308,12 @@ async function fetchUsage(output) {
     return fetchUsageFromSessionLog(cfg, output);
   }
 
+  const openAiResult = await fetchUsageFromOpenAIWeb(output);
+  if (openAiResult.ok) {
+    return openAiResult;
+  }
+
+  output.appendLine(`[info] OpenAI web source failed (${openAiResult.error}), trying command fallback`);
   const commandResult = await fetchUsageFromCommand(cfg, output);
   if (commandResult.ok) {
     return commandResult;
@@ -1263,8 +1327,57 @@ async function fetchUsage(output) {
 
   return {
     ok: false,
-    error: `command failed: ${commandResult.error}; session log failed: ${sessionResult.error}`,
+    error: `openai web failed: ${openAiResult.error}; command failed: ${commandResult.error}; session log failed: ${sessionResult.error}`,
   };
+}
+
+async function fetchUsageFromOpenAIWeb(output) {
+  try {
+    const auth = readOpenAiWebAuth();
+    if (!auth) {
+      return { ok: false, error: 'No OpenAI OAuth token found in OpenCode auth.json' };
+    }
+
+    const expiresMs = normalizeEpochMs(auth.expires);
+    if (expiresMs && Date.now() >= expiresMs - 60000) {
+      return { ok: false, error: 'OpenAI OAuth token expired in OpenCode auth.json' };
+    }
+
+    const accountId = extractChatGptAccountId(auth.access);
+    output.appendLine('[run:openai-web] GET /backend-api/wham/usage');
+    const headers = {
+      Authorization: `Bearer ${auth.access}`,
+      Accept: 'application/json',
+      'User-Agent': 'AI-Usage-Status-Bar',
+    };
+    if (accountId) {
+      headers['ChatGPT-Account-Id'] = accountId;
+    }
+
+    const data = await httpsGetJson('chatgpt.com', '/backend-api/wham/usage', headers, OPENAI_WEB_TIMEOUT_MS);
+    const primary = normalizeOpenAiWindow(data?.rate_limit?.primary_window);
+    const secondary = normalizeOpenAiWindow(data?.rate_limit?.secondary_window);
+    const hasData = primary || secondary;
+    if (!hasData) {
+      return { ok: false, error: 'No rate limit windows in OpenAI usage response' };
+    }
+
+    const rateLimits = { primary, secondary };
+    const summary = formatRateLimitSingleWindowSummary(rateLimits);
+    const raw = `OpenAI H/W left\n${formatRateLimitRaw(rateLimits)}`;
+    const planType = String(data?.plan_type || '').trim();
+    const label = planType ? `OpenAI (${capitalize(planType)})` : 'OpenAI';
+    return {
+      ok: true,
+      summary,
+      raw,
+      sourceLabel: 'Source: OpenAI web usage',
+      rateLimits,
+      groups: [{ label, rateLimits }],
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 async function fetchClaudeUsage(output) {
@@ -1668,6 +1781,125 @@ async function fetchGeminiUsage(output) {
       raw,
       sourceLabel: 'Source: Gemini Code Assist API',
       geminiModels: models,
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function fetchKimiUsage(output) {
+  try {
+    const cfg = getConfig();
+    const credPath = expandHome(cfg.kimiCredentialsPath);
+    
+    // Check for Kimi CLI credentials
+    if (!fs.existsSync(credPath)) {
+      return { ok: false, error: `Missing ${credPath}. Run 'kimi login' first.` };
+    }
+
+    const creds = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+    const accessToken = creds?.access_token;
+    
+    if (!accessToken) {
+      return { ok: false, error: "No Kimi access token found. Run 'kimi login' first." };
+    }
+
+    // Check token expiry
+    const expiresAt = creds?.expires_at;
+    if (expiresAt) {
+      const expiresMs = expiresAt > 1e12 ? expiresAt : expiresAt * 1000;
+      if (Date.now() >= expiresMs - 60000) {
+        return { ok: false, error: "Kimi token expired. Run 'kimi login' to refresh." };
+      }
+    }
+
+    output.appendLine('[run:kimi] GET /models');
+    
+    // Fetch models to get rate limits from headers
+    const result = await new Promise((resolve, reject) => {
+      const req = https.request(
+        {
+          hostname: 'api.kimi.com',
+          path: '/coding/v1/models',
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+        },
+        (res) => {
+          let raw = '';
+          res.on('data', (chunk) => { raw += chunk; });
+          res.on('end', () => {
+            if (res.statusCode === 401) {
+              reject(new Error('Unauthorized (401) - Token expired or invalid'));
+              return;
+            }
+            if (res.statusCode !== 200) {
+              reject(new Error(`HTTP ${res.statusCode}: ${raw.slice(0, 200)}`));
+              return;
+            }
+            
+            // Parse rate limits from headers
+            const limitRequests = res.headers['x-ratelimit-limit-requests'];
+            const remainingRequests = res.headers['x-ratelimit-remaining-requests'];
+            const resetRequests = res.headers['x-ratelimit-reset-requests'];
+            
+            let models = [];
+            try {
+              const data = JSON.parse(raw);
+              models = data.data || [];
+            } catch (_e) { /* ignore */ }
+            
+            resolve({
+              limitRequests,
+              remainingRequests,
+              resetRequests,
+              modelCount: models.length,
+            });
+          });
+        }
+      );
+      req.on('error', reject);
+      req.setTimeout(KIMI_TIMEOUT_MS, () => {
+        req.destroy(new Error('Request timed out'));
+      });
+      req.end();
+    });
+
+    const limit = result.limitRequests ? parseInt(result.limitRequests, 10) : null;
+    const remaining = result.remainingRequests ? parseInt(result.remainingRequests, 10) : null;
+    const leftPercent = (limit && remaining !== null) ? Math.round((remaining / limit) * 100) : null;
+    
+    // Format summary for status bar
+    let summary;
+    if (leftPercent !== null) {
+      summary = `${leftPercent}%`;
+    } else if (result.remainingRequests) {
+      summary = `${result.remainingRequests}`;
+    } else {
+      summary = 'OK';
+    }
+
+    const raw = `Kimi: ${remaining !== null ? remaining : '?'}/${limit !== null ? limit : '?'} requests remaining`;
+    
+    return {
+      ok: true,
+      summary,
+      raw,
+      sourceLabel: 'Source: Kimi API',
+      rateLimits: {
+        primary: {
+          used_percent: leftPercent !== null ? 100 - leftPercent : null,
+          resets_at: result.resetRequests ? parseInt(result.resetRequests, 10) : null,
+        },
+        secondary: null,
+      },
+      kimiInfo: {
+        modelCount: result.modelCount,
+        limitRequests: result.limitRequests,
+        remainingRequests: result.remainingRequests,
+      },
     };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -2092,6 +2324,85 @@ function expandHome(inputPath) {
     return path.join(os.homedir(), inputPath.slice(2));
   }
   return inputPath;
+}
+
+function getOpenCodeAuthCandidatePaths() {
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, '.local', 'share', 'opencode', 'auth.json'),
+    path.join(home, 'Library', 'Application Support', 'opencode', 'auth.json'),
+  ];
+  if (process.env.APPDATA) {
+    candidates.push(path.join(process.env.APPDATA, 'opencode', 'auth.json'));
+  }
+  if (process.env.LOCALAPPDATA) {
+    candidates.push(path.join(process.env.LOCALAPPDATA, 'opencode', 'auth.json'));
+  }
+  return [...new Set(candidates)];
+}
+
+function readOpenAiWebAuth() {
+  for (const authPath of getOpenCodeAuthCandidatePaths()) {
+    try {
+      if (!fs.existsSync(authPath)) continue;
+      const auth = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+      const token = auth?.codex || auth?.openai || auth?.chatgpt || auth?.opencode;
+      if (token?.type === 'oauth' && token?.access) {
+        return token;
+      }
+    } catch (_err) {
+      // Try the next candidate path.
+    }
+  }
+  return null;
+}
+
+function normalizeOpenAiWindow(window) {
+  if (!window || typeof window.used_percent !== 'number') {
+    return null;
+  }
+  return {
+    used_percent: Math.max(0, Math.min(100, window.used_percent)),
+    resets_at: normalizeOpenAiReset(window),
+  };
+}
+
+function normalizeOpenAiReset(window) {
+  if (typeof window?.reset_at === 'number' && Number.isFinite(window.reset_at) && window.reset_at > 0) {
+    return window.reset_at > 1e12 ? Math.floor(window.reset_at / 1000) : Math.floor(window.reset_at);
+  }
+  if (typeof window?.reset_after_seconds === 'number' && Number.isFinite(window.reset_after_seconds) && window.reset_after_seconds > 0) {
+    return Math.floor((Date.now() + (window.reset_after_seconds * 1000)) / 1000);
+  }
+  return null;
+}
+
+function normalizeEpochMs(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  return value > 1e12 ? Math.floor(value) : Math.floor(value * 1000);
+}
+
+function extractChatGptAccountId(accessToken) {
+  try {
+    if (!accessToken || typeof accessToken !== 'string') {
+      return null;
+    }
+    const parts = accessToken.split('.');
+    if (parts.length < 2) {
+      return null;
+    }
+    const payload = JSON.parse(Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+    return payload?.['https://api.openai.com/auth.chatgpt_account_id'] || null;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function capitalize(value) {
+  const s = String(value || '');
+  return s ? `${s.charAt(0).toUpperCase()}${s.slice(1)}` : s;
 }
 
 function findNewestFileRecursive(rootDir) {

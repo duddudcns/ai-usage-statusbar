@@ -1,8 +1,8 @@
 {
   "name": "codex-usage-statusbar",
   "displayName": "AI Usage Status Bar",
-  "description": "Show Codex, Claude, Copilot, and Gemini usage in the status bar with a sidebar control panel.",
-  "version": "0.0.53",
+  "description": "Show Codex, Claude, Copilot, Gemini, and Kimi usage in the status bar with a sidebar control panel.",
+  "version": "0.0.54",
   "publisher": "duddudcns",
   "icon": "ai_usage_statusbar.png",
   "engines": {
@@ -30,7 +30,7 @@
         {
           "type": "webview",
           "id": "aiUsage.settingsPanel",
-          "name": "Settings v0.0.53"
+          "name": "Settings v0.0.54"
         }
       ]
     },
@@ -46,6 +46,10 @@
       {
         "command": "codexUsage.refreshGemini",
         "title": "Codex Usage: Refresh Gemini"
+      },
+      {
+        "command": "codexUsage.refreshKimi",
+        "title": "Codex Usage: Refresh Kimi"
       }
     ],
     "configuration": {
@@ -107,10 +111,11 @@
           "default": "auto",
           "enum": [
             "auto",
+            "openaiWeb",
             "command",
             "sessionLog"
           ],
-          "description": "Data source mode. auto tries command first, then session log fallback."
+          "description": "Data source mode. auto tries OpenAI web usage first, then command, then session log fallback."
         },
         "codexUsage.commandTimeoutMs": {
           "type": "number",
@@ -179,6 +184,22 @@
           "type": "boolean",
           "default": true,
           "description": "Show Gemini Pro status in the Gemini status bar text."
+        },
+        "kimiUsage.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Kimi usage in the status bar."
+        },
+        "kimiUsage.credentialsPath": {
+          "type": "string",
+          "default": "~/.kimi/credentials/kimi-code.json",
+          "description": "Path to Kimi CLI credentials file."
+        },
+        "kimiUsage.commandTimeoutMs": {
+          "type": "number",
+          "default": 8000,
+          "minimum": 1000,
+          "description": "Timeout for Kimi usage command in milliseconds."
         }
       }
     }
