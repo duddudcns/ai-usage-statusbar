@@ -22,6 +22,24 @@ $11. default/config fallback
 - Result: when `geminiUsage.*` write is rejected by VS Code, checkbox changes
   still apply to Gemini statusbar model filtering immediately.
 
+
+## 0.0.55 - 2026-04-13
+
+### Added - 0.0.55 - 2026-04-13
+
+- File Watchers: Added real-time monitoring for Claude and Codex session log files (`.jsonl`) and Gemini credentials. Status bar now updates immediately when you send messages in the terminal.
+- Smart Refresh Strategy:
+  - Local Buffer: Prefers local logs if they are fresh (within 2 minutes) to save API quota and provide zero-latency updates.
+  - API Cooldown: Limits API polling to at most once every 5 minutes per provider (Claude/Codex) per account to prevent rate limiting.
+- Focus-Triggered Refresh: Automatically refreshes usage data when the VS Code window gains focus or when the active editor changes.
+- Improved Auto-Refresh: Replaced `setInterval` with recursive `setTimeout` for better reliability and handling of long-running API requests.
+
+### Changed - 0.0.55 - 2026-04-13
+
+- Standardized all logic-related comments in `extension.js` to English.
+- Updated sidebar panel name to `Settings v0.0.55`.
+
+
 ## 0.0.36 - 2026-03-03
 
 ### Changed - 0.0.36 - 2026-03-03

@@ -39,6 +39,8 @@ let lastClaudeOauth429At = 0;
 let lastClaudeOauth429RetryAfterMs = 5 * 60 * 1000; // starts at 5 min, exponential backoff
 let lastClaudeOauthSuccessAt = 0; // timestamp of last successful API call
 const CLAUDE_OAUTH_MIN_INTERVAL_MS = 5 * 60 * 1000; // call API at most once per 5 minutes
+let lastCodexOauthSuccessAt = 0; // timestamp of last successful API call
+const CODEX_OAUTH_MIN_INTERVAL_MS = 5 * 60 * 1000; // call API at most once per 5 minutes
 let extensionState = null;
 
 function activate(context) {
@@ -70,7 +72,7 @@ function activate(context) {
   copilotItem.command = 'codexUsage.refreshCopilot';
   geminiItem.command = 'codexUsage.refreshGemini';
   kimiItem.command = 'codexUsage.refreshKimi';
-  // 초기 로딩: 아이콘 + 스피너 (이후 새로고침 시에는 이전 데이터를 유지)
+  // initial loading: icon + spinner (keep previous data on subsequent refreshes)
   codexItem.text = `${CODEX_ICON} $(sync~spin)`;
   claudeItem.text = `${CLAUDE_ICON} $(sync~spin)`;
   copilotItem.text = `${COPILOT_ICON} $(sync~spin)`;
@@ -279,22 +281,89 @@ function activate(context) {
     return allRefreshInFlight;
   };
 
+  const setupFileWatchers = () => {
+    const cfg = getConfig();
+    const watchers = [];
+
+    // Claude log files
+    const claudePath = expandHome(cfg.claudeSessionsRoot);
+    if (claudePath && fs.existsSync(claudePath)) {
+      try {
+        const watcher = vscode.workspace.createFileSystemWatcher(
+          new vscode.RelativePattern(claudePath, '**/*.jsonl')
+        );
+        watcher.onDidChange(() => {
+          output.appendLine('[watcher:claude] log file changed');
+          void runProviderRefresh('claude');
+        });
+        watchers.push(watcher);
+      } catch (err) {
+        output.appendLine(`[watcher:error] claude: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // Codex log files
+    const codexPath = expandHome(cfg.sessionsRoot);
+    if (codexPath && fs.existsSync(codexPath)) {
+      try {
+        const watcher = vscode.workspace.createFileSystemWatcher(
+          new vscode.RelativePattern(codexPath, '**/*.jsonl')
+        );
+        watcher.onDidChange(() => {
+          output.appendLine('[watcher:codex] log file changed');
+          void runProviderRefresh('codex');
+        });
+        watchers.push(watcher);
+      } catch (err) {
+        output.appendLine(`[watcher:error] codex: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // Gemini credentials
+    const geminiCredPath = path.join(os.homedir(), '.gemini', 'oauth_creds.json');
+    if (fs.existsSync(path.dirname(geminiCredPath))) {
+      try {
+        const watcher = vscode.workspace.createFileSystemWatcher(
+          new vscode.RelativePattern(path.dirname(geminiCredPath), 'oauth_creds.json')
+        );
+        watcher.onDidChange(() => {
+          output.appendLine('[watcher:gemini] credentials changed');
+          void runProviderRefresh('gemini');
+        });
+        watchers.push(watcher);
+      } catch (err) {
+        output.appendLine(`[watcher:error] gemini: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    return watchers;
+  };
+
+  let fileWatchers = setupFileWatchers();
+
   const startTimer = () => {
     stopTimer();
-    timer = setInterval(() => {
-      void refreshAll();
-    }, AUTO_REFRESH_INTERVAL_MS);
+    const tick = async () => {
+      await refreshAll();
+      timer = setTimeout(tick, AUTO_REFRESH_INTERVAL_MS);
+    };
+    timer = setTimeout(tick, AUTO_REFRESH_INTERVAL_MS);
   };
 
   const stopTimer = () => {
     if (timer) {
-      clearInterval(timer);
+      clearTimeout(timer);
       timer = null;
     }
   };
 
   const onConfigChanged = vscode.workspace.onDidChangeConfiguration((e) => {
-    // 언어 변경 시 새로고침 없이 툴팁 + 상태바 텍스트 즉시 재빌드
+    // Watcher path might have changed
+    if (e.affectsConfiguration('claudeUsage.sessionsRoot') || e.affectsConfiguration('codexUsage.sessionsRoot')) {
+      fileWatchers.forEach(w => w.dispose());
+      fileWatchers = setupFileWatchers();
+    }
+    // language changed: rebuild tooltip and status bar text immediately without fetching
     if (e.affectsConfiguration('aiUsage.language')) {
       if (lastResults.codex) {
         codexItem.tooltip = buildProviderTooltip('Codex', CODEX_ICON, lastResults.codex);
@@ -315,7 +384,7 @@ function activate(context) {
       return;
     }
 
-    // 표시 항목 토글은 재조회 없이 즉시 표시 상태만 변경
+    // provider toggled: change visibility without fetching
     const geminiToggleChanged = (
       e.affectsConfiguration('geminiUsage.enabled') ||
       e.affectsConfiguration('geminiUsage.showFlashLite') ||
@@ -450,6 +519,17 @@ function activate(context) {
     refreshGeminiFromCacheCmd,
     openOutputCmd,
     onConfigChanged,
+    vscode.window.onDidChangeWindowState((e) => {
+      if (e.focused) {
+        output.appendLine('[event] window focused, triggering refresh');
+        void refreshAll();
+      }
+    }),
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      output.appendLine('[event] active editor changed, triggering refresh');
+      void refreshAll();
+    }),
+    { dispose: () => fileWatchers.forEach(w => w.dispose()) },
     vscode.window.registerWebviewViewProvider(SettingsPanelProvider.viewType, panel)
   );
 
@@ -711,7 +791,7 @@ class SettingsPanelProvider {
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = this._buildHtml();
 
-    // 패널이 열릴 때 이미 있는 결과 즉시 전송
+    // send existing results immediately when panel is opened
     webviewView.onDidChangeVisibility(() => {
       if (webviewView.visible) {
         const r = this._getLastResults?.();
@@ -766,7 +846,7 @@ class SettingsPanelProvider {
       } else if (msg.type === 'ready') {
         const r = this._getLastResults?.();
         if (r) this.postResults(r);
-        // 첫 로드 시 캐시가 비어 있으면 즉시 1회 새로고침하여 로딩 고착 방지
+        // Trigger one immediate refresh if cache is empty to prevent stuck loading state
         if (!r || (!r.codex && !r.claude && !r.copilot && !r.gemini && !r.kimi)) {
           vscode.commands.executeCommand('codexUsage.refresh');
         }
@@ -783,11 +863,11 @@ class SettingsPanelProvider {
     }, undefined, this._context.subscriptions);
 
     vscode.workspace.onDidChangeConfiguration((e) => {
-      // 패널 전체 재렌더는 언어 변경시에만 수행 (깜빡임 방지)
+      // Re-render whole panel only on language change to prevent flickering
       if (e.affectsConfiguration('aiUsage.language')) {
         if (this._view) {
           this._view.webview.html = this._buildHtml();
-          // HTML 재빌드 후 기존 결과 즉시 재전송
+          // Re-send existing results after HTML rebuild
           const r = this._getLastResults?.();
           if (r) this.postResults(r);
         }
@@ -1098,7 +1178,7 @@ function toggleCheck(id) {
   renderUsage(CURRENT_RESULTS);
 }
 
-// ── 사용량 렌더링 ──────────────────────────────────────────
+// ── Usage rendering ──────────────────────────────────────────
 window.addEventListener('message', (e) => {
   if (e.data?.type === 'results') {
     CURRENT_RESULTS = e.data.data || {};
@@ -1107,7 +1187,7 @@ window.addEventListener('message', (e) => {
     setRefreshingState(e.data.state);
   }
 });
-// 웹뷰 준비 완료 신호: 초기 결과/새로고침 트리거 동기화
+// Webview ready signal: sync initial results / refresh trigger
 vscode.postMessage({ type: 'ready' });
 
 function isProviderEnabled(id) {
@@ -1223,7 +1303,7 @@ function renderUsage(data) {
   area.innerHTML = html || '<div class="usage-text">' + T.noData + '</div>';
 }
 
-// 초기 렌더: 로딩 문구 없이 마지막 결과 우선 표시
+// Initial render: show last results immediately without loading message
 renderUsage(INITIAL_RESULTS);
 </script>
 </body>
@@ -1296,8 +1376,18 @@ function getConfig() {
 
 async function fetchUsage(output) {
   const cfg = getConfig();
+
+  // Try session log first to check for freshness
+  const sessionResult = await fetchUsageFromSessionLog(cfg, output);
+  const hasFreshSessionLog = sessionResult.ok && (Date.now() - sessionResult.latestMessageTs < 2 * 60 * 1000);
+
+  if (hasFreshSessionLog) {
+    output.appendLine(`[info:codex] using fresh session log (${Math.round((Date.now() - sessionResult.latestMessageTs)/1000)}s old)`);
+    return sessionResult;
+  }
+
   if (cfg.source === 'openaiWeb') {
-    return fetchUsageFromOpenAIWeb(output);
+    return fetchUsageFromOpenAIWebWithCooldown(output);
   }
 
   if (cfg.source === 'command') {
@@ -1305,30 +1395,39 @@ async function fetchUsage(output) {
   }
 
   if (cfg.source === 'sessionLog') {
-    return fetchUsageFromSessionLog(cfg, output);
+    return sessionResult;
   }
 
-  const openAiResult = await fetchUsageFromOpenAIWeb(output);
+  // Auto mode: try web API with cooldown, then fallback to command, then session log
+  const openAiResult = await fetchUsageFromOpenAIWebWithCooldown(output);
   if (openAiResult.ok) {
     return openAiResult;
   }
 
-  output.appendLine(`[info] OpenAI web source failed (${openAiResult.error}), trying command fallback`);
+  output.appendLine(`[info] OpenAI web source skipped or failed (${openAiResult.error}), trying command fallback`);
   const commandResult = await fetchUsageFromCommand(cfg, output);
   if (commandResult.ok) {
     return commandResult;
   }
 
-  output.appendLine(`[info] command source failed (${commandResult.error}), trying session log fallback`);
-  const sessionResult = await fetchUsageFromSessionLog(cfg, output);
-  if (sessionResult.ok) {
-    return sessionResult;
+  output.appendLine(`[info] command source failed (${commandResult.error}), returning session log result`);
+  return sessionResult;
+}
+
+async function fetchUsageFromOpenAIWebWithCooldown(output) {
+  const ageMs = Date.now() - lastCodexOauthSuccessAt;
+  if (lastCodexOauthSuccessAt && ageMs < CODEX_OAUTH_MIN_INTERVAL_MS) {
+    output.appendLine(`[info:codex] API cooldown, using cached result if available (${Math.round(ageMs/1000)}s since last success)`);
+    // fetchUsageFromOpenAIWeb itself doesn't have a cache, but the caller will receive this error
+    // and fallback to other sources or show '-'
+    return { ok: false, error: `API cooldown (${Math.round((CODEX_OAUTH_MIN_INTERVAL_MS - ageMs)/1000)}s remaining)` };
   }
 
-  return {
-    ok: false,
-    error: `openai web failed: ${openAiResult.error}; command failed: ${commandResult.error}; session log failed: ${sessionResult.error}`,
-  };
+  const result = await fetchUsageFromOpenAIWeb(output);
+  if (result.ok) {
+    lastCodexOauthSuccessAt = Date.now();
+  }
+  return result;
 }
 
 async function fetchUsageFromOpenAIWeb(output) {
@@ -1395,17 +1494,23 @@ async function fetchClaudeUsage(output) {
     const projectsRoot = expandHome(cfg.claudeSessionsRoot);
     const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
 
-    // ── 1순위: 로컬 JSONL 토큰 카운트 ──────────────────────────────────────
-    // 최근 5시간 내 Claude Code 세션 데이터가 있으면 API 호출 없이 바로 표시
+    // ── 1. Local JSONL token count ──────────────────────────────────────
     const tokenResult = buildClaudeRateLimitsFromLocalTokenCount(projectsRoot, credPath, output);
-    if (tokenResult) {
-      output.appendLine(`[info:claude] local token count: ${tokenResult.usedTokens}/${tokenResult.planLimit} tokens`);
+    const hasFreshLocalLog = tokenResult && (Date.now() - tokenResult.latestMessageTs < 2 * 60 * 1000);
+
+    // If local log is fresh (within 2 mins), use it directly without API call
+    if (hasFreshLocalLog) {
+      output.appendLine(`[info:claude] using fresh local log (${Math.round((Date.now() - tokenResult.latestMessageTs)/1000)}s old): ${tokenResult.usedTokens}/${tokenResult.planLimit} tokens`);
       lastClaudeRateLimitResult = tokenResult.result;
       extensionState?.update('claude.lastRateLimitResult', tokenResult.result);
       return tokenResult.result;
     }
 
-    // ── 2순위: 로컬 JSONL rate_limits 필드 (Claude Code가 기록하는 경우) ───
+    if (tokenResult) {
+      output.appendLine(`[info:claude] local log exists but old (${Math.round((Date.now() - tokenResult.latestMessageTs)/60000)}m old), checking API`);
+    }
+
+    // ── 2. Local JSONL rate_limits field (written by Claude Code) ───
     if (cfg.claudeCommand && cfg.claudeCommand.trim()) {
       const cmdResult = await fetchSimpleCommandUsage(
         'claudeUsage.command',
@@ -1421,35 +1526,39 @@ async function fetchClaudeUsage(output) {
 
     const sessionHit = findNewestClaudeSessionWithRateLimits(projectsRoot, 20);
     if (sessionHit) {
-      output.appendLine(`[run:claude-session] ${sessionHit.filePath}`);
-      const summary = formatRateLimitSingleWindowSummary(sessionHit.rateLimits);
-      const raw = `Claude H/W left\n${formatRateLimitRaw(sessionHit.rateLimits)}`;
-      const result = {
-        ok: true,
-        summary,
-        raw,
-        sourceLabel: 'Source: local session rate limits',
-        rateLimits: sessionHit.rateLimits,
-        groups: [{ label: 'Claude', rateLimits: sessionHit.rateLimits }],
-      };
-      lastClaudeRateLimitResult = result;
-      extensionState?.update('claude.lastRateLimitResult', result);
-      return result;
+      // Check session file freshness (rate_limits usually updated on message)
+      const hitAge = Date.now() - sessionHit.mtimeMs;
+      if (hitAge < 2 * 60 * 1000) {
+        output.appendLine(`[run:claude-session] fresh session file: ${sessionHit.filePath}`);
+        const summary = formatRateLimitSingleWindowSummary(sessionHit.rateLimits);
+        const raw = `Claude H/W left\n${formatRateLimitRaw(sessionHit.rateLimits)}`;
+        const result = {
+          ok: true,
+          summary,
+          raw,
+          sourceLabel: 'Source: local session rate limits (fresh)',
+          rateLimits: sessionHit.rateLimits,
+          groups: [{ label: 'Claude', rateLimits: sessionHit.rateLimits }],
+        };
+        lastClaudeRateLimitResult = result;
+        extensionState?.update('claude.lastRateLimitResult', result);
+        return result;
+      }
     }
 
-    // ── 3순위: OAuth API (로컬에 데이터 없을 때만 호출) ─────────────────────
+    // ── 3. OAuth API (call if local data is stale or missing) ─────────────────────
     const MAX_COOLDOWN_MS = 30 * 60 * 1000;
 
-    // 5분 이내 성공 캐시가 있으면 API 재호출 스킵
+    // Skip API if successful within the last 5 minutes
     if (lastClaudeOauthSuccessAt && Date.now() - lastClaudeOauthSuccessAt < CLAUDE_OAUTH_MIN_INTERVAL_MS) {
       if (lastClaudeRateLimitResult?.ok) {
         const ageSec = Math.round((Date.now() - lastClaudeOauthSuccessAt) / 1000);
-        output.appendLine(`[info:claude] using cached API result (${ageSec}s old)`);
+        output.appendLine(`[info:claude] API cooldown, using cached result (${ageSec}s old)`);
         return { ...lastClaudeRateLimitResult, sourceLabel: `${lastClaudeRateLimitResult.sourceLabel} (cached)` };
       }
     }
 
-    // 429 쿨다운 중이면 API 스킵
+    // Skip API if in 429 cooldown
     let oauthResult = null;
     if (lastClaudeOauth429At && Date.now() - lastClaudeOauth429At < lastClaudeOauth429RetryAfterMs) {
       const remainSec = Math.ceil((lastClaudeOauth429RetryAfterMs - (Date.now() - lastClaudeOauth429At)) / 1000);
@@ -1487,14 +1596,14 @@ async function fetchClaudeUsage(output) {
       }
     }
 
-    // API 실패 시 캐시 반환
+    // Return cache on API failure
     if ((isClaudeTransientError(oauthResult?.error) || isClaudeRateLimitError(oauthResult?.error)) && lastClaudeRateLimitResult?.ok) {
       const reason = isClaudeRateLimitError(oauthResult.error) ? 'oauth 429' : 'oauth error';
       output.appendLine(`[info:claude] ${reason}, using cached result`);
       return { ...lastClaudeRateLimitResult, sourceLabel: `${lastClaudeRateLimitResult.sourceLabel} (cached)` };
     }
 
-    // API 완전 실패 + 캐시 없음
+    // API total failure + no cache
     if (isClaudeRateLimitError(oauthResult?.error)) {
       const remainSec = lastClaudeOauth429At
         ? Math.max(0, Math.ceil((lastClaudeOauth429RetryAfterMs - (Date.now() - lastClaudeOauth429At)) / 1000))
@@ -2261,7 +2370,16 @@ async function fetchUsageFromSessionLog(cfg, output) {
       label: mapLimitLabel(groupsByLimit[id].rate_limits),
       rateLimits: groupsByLimit[id].rate_limits,
     }));
-    return { ok: true, summary, raw, sourceLabel: 'Source: session log', groups };
+
+    let latestMessageTs = 0;
+    for (const id of orderedLimitIds) {
+      const ts = isoToEpochSeconds(groupsByLimit[id].timestamp);
+      if (ts && ts * 1000 > latestMessageTs) {
+        latestMessageTs = ts * 1000;
+      }
+    }
+
+    return { ok: true, summary, raw, sourceLabel: 'Source: session log', groups, latestMessageTs };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -2545,6 +2663,7 @@ function buildClaudeRateLimitsFromLocalTokenCount(projectsRoot, credPath, output
     const usedTokens = messages.reduce((s, m) => s + m.tokens, 0);
     const usedPercent = Math.min((usedTokens / planLimit) * 100, 100);
     const resetsAtSec = Math.floor(sessionEnd / 1000);
+    const latestMessageTs = messages[messages.length - 1].ts;
 
     const rateLimits = {
       primary: { used_percent: usedPercent, resets_at: resetsAtSec },
@@ -2560,7 +2679,7 @@ function buildClaudeRateLimitsFromLocalTokenCount(projectsRoot, credPath, output
       rateLimits,
       groups: [{ label: 'Claude', rateLimits }],
     };
-    return { result, usedTokens, planLimit };
+    return { result, usedTokens, planLimit, latestMessageTs };
   } catch (err) {
     if (output) output.appendLine(`[warn:claude] local token count failed: ${err.message}`);
     return null;
